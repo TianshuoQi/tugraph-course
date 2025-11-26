@@ -1,5 +1,0 @@
-// TP (Transaction Processing) integration tests
-
-pub mod integrity_check;
-pub mod isolation_level_test;
-pub mod tp_graph_test;
