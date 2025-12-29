@@ -1,1 +1,3 @@
 target/
+minigu/*/.checkpoint
+minigu/*/.wal
