@@ -105,14 +105,79 @@ impl VersionedVertex {
     }
     /// TODO(course): You need to implement this function
     pub fn get_visible(&self, txn: &MemTransaction) -> StorageResult<Vertex> {
-        Err(StorageError::Transaction(
-            TransactionError::VersionNotVisible("get_visible not implemented".to_string()),
-        ))
+        let current = self.chain.current.read().unwrap();
+        let mut visible_vertex = current.data.clone();
+        // If the vertex is modified by the same transaction, or the transaction is before the
+        // vertex was modified, return the vertex
+        let commit_ts = current.commit_ts;
+        // If the commit timestamp of current is equal to the transaction id of txn, it means
+        // the vertex is modified by the same transaction.
+        // If the commit timestamp of current is less than the start timestamp of txn, it means
+        // the vertex was modified before the transaction started, and the corresponding transaction
+        // has been committed.
+        if (commit_ts.is_txn_id() && commit_ts == txn.txn_id())
+            || (commit_ts.is_commit_ts() && commit_ts <= txn.start_ts())
+        {
+            // Check if the current vertex is tombstone
+            if visible_vertex.is_tombstone() {
+                return Err(StorageError::Transaction(
+                    TransactionError::VersionNotVisible(format!(
+                        "Vertex is tombstone for {:?}",
+                        txn.txn_id()
+                    )),
+                ));
+            }
+            Ok(visible_vertex)
+        } else {
+            // Otherwise, apply the deltas to the vertex
+            let undo_ptr = self.chain.undo_ptr.read().unwrap().clone();
+            // Closure to apply the deltas to the vertex
+            let apply_deltas = |undo_entry: &UndoEntry| match undo_entry.delta() {
+                DeltaOp::CreateVertex(original) => visible_vertex = original.clone(),
+                DeltaOp::SetVertexProps(_, SetPropsOp { indices, props }) => {
+                    visible_vertex.set_props(indices, props.clone());
+                }
+                DeltaOp::DelVertex(_) => {
+                    visible_vertex.is_tombstone = true;
+                }
+                _ => unreachable!("Unreachable delta op for a vertex"),
+            };
+            MemTransaction::apply_deltas_for_read(undo_ptr, apply_deltas, txn.start_ts());
+            // Check if the vertex is tombstone after applying the deltas
+            if visible_vertex.is_tombstone() {
+                return Err(StorageError::Transaction(
+                    TransactionError::VersionNotVisible(format!(
+                        "Vertex is tombstone for {:?}",
+                        txn.txn_id()
+                    )),
+                ));
+            }
+            Ok(visible_vertex)
+        }
     }
     /// TODO(course): You need to implement this function
     /// Returns whether the vertex is visible.
     pub(super) fn is_visible(&self, txn: &MemTransaction) -> bool {
-        true
+        // Check if the vertex is visible based on the transaction's start timestamp
+        let current = self.chain.current.read().unwrap();
+        if (current.commit_ts.is_txn_id() && current.commit_ts == txn.txn_id())
+            || (current.commit_ts.is_commit_ts() && current.commit_ts <= txn.start_ts())
+        {
+            !current.data.is_tombstone()
+        } else {
+            let undo_ptr = self.chain.undo_ptr.read().unwrap().clone();
+            let mut is_visible = !current.data.is_tombstone();
+            let apply_deltas = |undo_entry: &UndoEntry| {
+                if let DeltaOp::DelVertex(_) = undo_entry.delta() {
+                    is_visible = false;
+                }
+                if let DeltaOp::CreateVertex(_) = undo_entry.delta() {
+                    is_visible = true;
+                }
+            };
+            MemTransaction::apply_deltas_for_read(undo_ptr, apply_deltas, txn.start_ts());
+            is_visible
+        }
     }
 }
 
@@ -153,16 +218,94 @@ impl VersionedEdge {
         }
     }
     /// TODO(course): You need to implement this function
-    pub fn get_visible(&self, _txn: &MemTransaction) -> StorageResult<Edge> {
-        Err(StorageError::Transaction(
-            TransactionError::VersionNotVisible("get_visible not implemented".to_string()),
-        ))
+    pub fn get_visible(&self, txn: &MemTransaction) -> StorageResult<Edge> {
+        let current = self.chain.current.read().unwrap();
+        let mut current_edge = current.data.clone();
+        if (current.commit_ts.is_txn_id() && current.commit_ts == txn.txn_id())
+            || (current.commit_ts.is_commit_ts() && current.commit_ts <= txn.start_ts())
+        {
+            // Check if the edge is tombstone
+            if current_edge.is_tombstone() {
+                return Err(StorageError::Transaction(
+                    TransactionError::VersionNotVisible(format!(
+                        "Edge is tombstone for {:?}",
+                        txn.txn_id()
+                    )),
+                ));
+            }
+            Ok(current_edge)
+        } else {
+            let undo_ptr = self.chain.undo_ptr.read().unwrap().clone();
+            let apply_deltas = |undo_entry: &UndoEntry| match undo_entry.delta() {
+                DeltaOp::CreateEdge(original) => current_edge = original.clone(),
+                DeltaOp::SetEdgeProps(_, SetPropsOp { indices, props }) => {
+                    current_edge.set_props(indices, props.clone());
+                }
+                DeltaOp::DelEdge(_) => {
+                    current_edge.is_tombstone = true;
+                }
+                _ => unreachable!("Unreachable delta op for an edge"),
+            };
+            MemTransaction::apply_deltas_for_read(undo_ptr, apply_deltas, txn.start_ts());
+            // Check if the vertex is tombstone after applying the deltas
+            if current_edge.is_tombstone() {
+                return Err(StorageError::Transaction(
+                    TransactionError::VersionNotVisible(format!(
+                        "Edge is tombstone for {:?}",
+                        txn.txn_id()
+                    )),
+                ));
+            }
+            Ok(current_edge)
+        }
     }
 
     /// TODO(course): You need to implement this function
     /// Returns whether the edge is visible.
     pub fn is_visible(&self, txn: &MemTransaction) -> bool {
-        true
+        let (src, dst);
+        {
+            let current = self.chain.current.read().unwrap();
+            src = current.data.dst_id();
+            dst = current.data.src_id();
+        }
+        if txn
+            .graph()
+            .vertices()
+            .get(&src)
+            .map(|v| v.is_visible(txn))
+            .unwrap_or(false)
+            && txn
+                .graph()
+                .vertices()
+                .get(&dst)
+                .map(|v| v.is_visible(txn))
+                .unwrap_or(false)
+        {
+            // Check if the vertex is visible based on the transaction's start timestamp
+            let current = self.chain.current.read().unwrap();
+            if (current.commit_ts.is_txn_id() && current.commit_ts == txn.txn_id())
+                || (current.commit_ts.is_commit_ts() && current.commit_ts <= txn.start_ts())
+            {
+                !current.data.is_tombstone()
+            } else {
+                let undo_ptr = self.chain.undo_ptr.read().unwrap().clone();
+                let mut is_visible = !current.data.is_tombstone();
+                let apply_deltas = |undo_entry: &UndoEntry| match undo_entry.delta() {
+                    DeltaOp::CreateEdge(_) => {
+                        is_visible = true;
+                    }
+                    DeltaOp::DelEdge(_) => {
+                        is_visible = false;
+                    }
+                    _ => {}
+                };
+                MemTransaction::apply_deltas_for_read(undo_ptr, apply_deltas, txn.start_ts());
+                is_visible
+            }
+        } else {
+            false
+        }
     }
 }
 
@@ -728,7 +871,24 @@ impl MemoryGraph {
 #[inline]
 fn check_write_conflict(_commit_ts: Timestamp, _txn: &Arc<MemTransaction>) -> StorageResult<()> {
     /// TODO(course): You need to implement write conflict detection here
-    Ok(())
+    match _commit_ts {
+        // If the vertex is modified by other transactions, return write-write conflict
+        ts if ts.is_txn_id() && ts != _txn.txn_id() => Err(StorageError::Transaction(
+            TransactionError::WriteWriteConflict(format!(
+                "Data is being modified by transaction {:?}",
+                ts
+            )),
+        )),
+        // If the vertex is committed by other transactions and its commit timestamp is greater
+        // than the start timestamp of the current transaction, return version not visible
+        ts if ts.is_commit_ts() && ts > _txn.start_ts() => Err(StorageError::Transaction(
+            TransactionError::VersionNotVisible(format!(
+                "Data version not visible for {:?}",
+                _txn.txn_id()
+            )),
+        )),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

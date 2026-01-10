@@ -38,7 +38,36 @@ impl Iterator for AdjacencyIterator<'_> {
         // 2. If yes, process the next entry, apply filters and visibility checks
         // 3. If no, call load_next_batch() to load the next batch of entries
         // 4. Repeat until an entry is found or no more data is available
-        None
+        if self.current_index >= self.current_entries.len() {
+            self.load_next_batch()?;
+        }
+
+        // Process entries in current batch
+        while self.current_index < self.current_entries.len() {
+            let entry = &self.current_entries[self.current_index];
+            self.current_index += 1;
+
+            let eid = entry.eid();
+
+            // Perform MVCC visibility check
+            let is_visible = self
+                .txn
+                .graph()
+                .edges
+                .get(&eid)
+                .map(|edge| edge.is_visible(self.txn))
+                .unwrap_or(false);
+
+            if is_visible && self.filters.iter().all(|f| f(entry)) {
+                let adj = *entry;
+                self.current_adj = Some(adj);
+                return Some(Ok(adj));
+            }
+        }
+
+        // If current batch is processed but no match found, try loading next batch
+        self.load_next_batch()?;
+        self.next()
     }
 }
 
@@ -49,6 +78,33 @@ impl<'a> AdjacencyIterator<'a> {
         // load BATCH_SIZE entries from adj_list into current_entries
         // reset current_index to 0
         // if data is loaded return Some(()), else return None
+        if let Some(adj_list) = &self.adj_list {
+            let mut current = if let Some(e) = self.current_entries.last() {
+                // If there is a last entry, get the next entry from the adjacency list
+                adj_list.get(e)?.next()?
+            } else {
+                // If there is no last entry, get the first entry from the adjacency list
+                adj_list.front()?
+            };
+            // Clear current entry batch
+            self.current_entries.clear();
+            self.current_index = 0;
+
+            // Load the next batch of entries
+            self.current_entries.push(*current.value());
+            for _ in 0..BATCH_SIZE {
+                if let Some(entry) = current.next() {
+                    self.current_entries.push(*entry.value());
+                    current = entry;
+                } else {
+                    break;
+                }
+            }
+
+            if !self.current_entries.is_empty() {
+                return Some(());
+            }
+        }
         None
     }
 
