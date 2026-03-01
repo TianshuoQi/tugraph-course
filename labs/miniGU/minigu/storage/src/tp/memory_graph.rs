@@ -218,46 +218,10 @@ impl VersionedEdge {
         }
     }
     /// TODO(course): You need to implement this function
-    pub fn get_visible(&self, txn: &MemTransaction) -> StorageResult<Edge> {
-        let current = self.chain.current.read().unwrap();
-        let mut current_edge = current.data.clone();
-        if (current.commit_ts.is_txn_id() && current.commit_ts == txn.txn_id())
-            || (current.commit_ts.is_commit_ts() && current.commit_ts <= txn.start_ts())
-        {
-            // Check if the edge is tombstone
-            if current_edge.is_tombstone() {
-                return Err(StorageError::Transaction(
-                    TransactionError::VersionNotVisible(format!(
-                        "Edge is tombstone for {:?}",
-                        txn.txn_id()
-                    )),
-                ));
-            }
-            Ok(current_edge)
-        } else {
-            let undo_ptr = self.chain.undo_ptr.read().unwrap().clone();
-            let apply_deltas = |undo_entry: &UndoEntry| match undo_entry.delta() {
-                DeltaOp::CreateEdge(original) => current_edge = original.clone(),
-                DeltaOp::SetEdgeProps(_, SetPropsOp { indices, props }) => {
-                    current_edge.set_props(indices, props.clone());
-                }
-                DeltaOp::DelEdge(_) => {
-                    current_edge.is_tombstone = true;
-                }
-                _ => unreachable!("Unreachable delta op for an edge"),
-            };
-            MemTransaction::apply_deltas_for_read(undo_ptr, apply_deltas, txn.start_ts());
-            // Check if the vertex is tombstone after applying the deltas
-            if current_edge.is_tombstone() {
-                return Err(StorageError::Transaction(
-                    TransactionError::VersionNotVisible(format!(
-                        "Edge is tombstone for {:?}",
-                        txn.txn_id()
-                    )),
-                ));
-            }
-            Ok(current_edge)
-        }
+    pub fn get_visible(&self, _txn: &MemTransaction) -> StorageResult<Edge> {
+        Err(StorageError::Transaction(
+            TransactionError::VersionNotVisible("get_visible not implemented".to_string()),
+        ))
     }
 
     /// TODO(course): You need to implement this function
